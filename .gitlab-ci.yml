@@ -1,0 +1,11 @@
+include: https://gitlab-templates.ddbuild.io/compute-delivery/v1/compute-delivery.yml
+
+goreleaser-snapshot:
+  extends: .compute-ci.goreleaser-snapshot
+
+goreleaser:
+  extends: .compute-ci.goreleaser
+  before_script:
+    - export GITHUB_TOKEN=$(aws ssm get-parameter --region us-east-1 --name github.user.datadog-compute-robot --with-decryption --query "Parameter.Value" --out text)
+    - aws ssm get-parameter --region us-east-1 --name prod.gcr.push.key --with-decryption --query "Parameter.Value" --out text > /google-application-credentials.json
+    - export GOOGLE_APPLICATION_CREDENTIALS=/google-application-credentials.json
