@@ -65,6 +65,22 @@ func pathConfig(b *jwtAuthBackend) *framework.Path {
 				Type:        framework.TypeString,
 				Description: "The value against which to match the 'iss' claim in a JWT. Optional.",
 			},
+			"gsuite_service_account_email": {
+				Type:        framework.TypeString,
+				Description: "Google service account email address. (required for GSuite metadata)",
+			},
+			"gsuite_service_account_private_key_id": {
+				Type:        framework.TypeString,
+				Description: "Google service account private key id. (required for GSuite metadata)",
+			},
+			"gsuite_service_account_private_key": {
+				Type:        framework.TypeString,
+				Description: "Google service account private key. (required for GSuite metadata)",
+			},
+			"gsuite_impersonate_email": &framework.FieldSchema{
+				Type:        framework.TypeString,
+				Description: "GSuite email account to impersonate. (requried for GSuite metadata)",
+			},
 		},
 
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -130,15 +146,19 @@ func (b *jwtAuthBackend) pathConfigRead(ctx context.Context, req *logical.Reques
 
 	resp := &logical.Response{
 		Data: map[string]interface{}{
-			"oidc_discovery_url":     config.OIDCDiscoveryURL,
-			"oidc_discovery_ca_pem":  config.OIDCDiscoveryCAPEM,
-			"oidc_client_id":         config.OIDCClientID,
-			"default_role":           config.DefaultRole,
-			"jwt_validation_pubkeys": config.JWTValidationPubKeys,
-			"jwt_supported_algs":     config.JWTSupportedAlgs,
-			"jwks_url":               config.JWKSURL,
-			"jwks_ca_pem":            config.JWKSCAPEM,
-			"bound_issuer":           config.BoundIssuer,
+			"oidc_discovery_url":                    config.OIDCDiscoveryURL,
+			"oidc_discovery_ca_pem":                 config.OIDCDiscoveryCAPEM,
+			"oidc_client_id":                        config.OIDCClientID,
+			"default_role":                          config.DefaultRole,
+			"jwt_validation_pubkeys":                config.JWTValidationPubKeys,
+			"jwt_supported_algs":                    config.JWTSupportedAlgs,
+			"jwks_url":                              config.JWKSURL,
+			"jwks_ca_pem":                           config.JWKSCAPEM,
+			"bound_issuer":                          config.BoundIssuer,
+			"gsuite_service_account_email":          config.GSuiteServiceAccountEmail,
+			"gsuite_service_account_private_key_id": config.GSuiteServiceAccountPrivateKeyID,
+			"gsuite_service_account_private_key":    config.GSuiteServiceAccountPrivateKey,
+			"gsuite_impersonate_email":              config.GSuiteImpersonateEmail,
 		},
 	}
 
@@ -157,6 +177,11 @@ func (b *jwtAuthBackend) pathConfigWrite(ctx context.Context, req *logical.Reque
 		JWTValidationPubKeys: d.Get("jwt_validation_pubkeys").([]string),
 		JWTSupportedAlgs:     d.Get("jwt_supported_algs").([]string),
 		BoundIssuer:          d.Get("bound_issuer").(string),
+
+		GSuiteServiceAccountEmail:        d.Get("gsuite_service_account_email").(string),
+		GSuiteServiceAccountPrivateKeyID: d.Get("gsuite_service_account_private_key_id").(string),
+		GSuiteServiceAccountPrivateKey:   d.Get("gsuite_service_account_private_key").(string),
+		GSuiteImpersonateEmail:           d.Get("gsuite_impersonate_email").(string),
 	}
 
 	// Run checks on values
@@ -292,6 +317,11 @@ type jwtConfig struct {
 	JWTSupportedAlgs     []string `json:"jwt_supported_algs"`
 	BoundIssuer          string   `json:"bound_issuer"`
 	DefaultRole          string   `json:"default_role"`
+
+	GSuiteServiceAccountEmail        string
+	GSuiteServiceAccountPrivateKeyID string
+	GSuiteServiceAccountPrivateKey   string
+	GSuiteImpersonateEmail           string
 
 	ParsedJWTPubKeys []interface{} `json:"-"`
 }
