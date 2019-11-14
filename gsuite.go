@@ -19,7 +19,7 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 	if config.GSuiteServiceAccountEmail == "" || config.GSuiteServiceAccountPrivateKeyID == "" ||
 		config.GSuiteServiceAccountPrivateKey == "" || config.GSuiteImpersonateEmail == "" {
 
-		b.Logger().Debug("skipping gsuite metadata, config missing")
+		b.Logger().Warn("skipping gsuite metadata, config missing")
 		return nil
 	}
 
@@ -69,6 +69,13 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 	}
 	claims["gsuite_teams"] = teams
 
+	groups, err := googleGroups(user, svc)
+	if err != nil {
+		return errors.New("Unable to lookup group memeberships of user")
+	}
+	metadataAttributes = append(metadataAttributes, groups)
+
+	b.Logger().Debug("gsuite_metadata claims: %v", metadataAttributes)
 	claims["gsuite_metadata"] = metadataAttributes
 	return nil
 }
@@ -208,6 +215,32 @@ func extractAttributes(u *directory.User, category, name string) []string {
 	}
 
 	return attrs
+}
+
+// googleGroups returns a list of Google groups that email is a member of.
+func googleGroups(u *directory.User, client *directory.Service) ([]string, error) {
+	groupsList, err := client.Groups.List().UserKey(u.Id).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	var groups []string
+	for _, g := range groupsList.Groups {
+		groups = append(groups, g.Name)
+	}
+
+	// Populate policies if the equivalent Google group exists
+	var claims []string
+	groupPrefix := "gsuite-group-"
+	for _, group := range groups {
+		if !strings.HasPrefix(group, groupPrefix) {
+			group = groupPrefix + group
+		}
+
+		claims = append(claims, normalize(group))
+	}
+
+	return claims, nil
 }
 
 // returns the lowercased string with all spaces removed and underscores converted to dashes
