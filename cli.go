@@ -3,6 +3,7 @@ package jwtauth
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +18,8 @@ import (
 
 const defaultMount = "oidc"
 const defaultPort = "8250"
+const defaultCallbackHost = "localhost"
+const defaultCallbackMethod = "http"
 
 var errorRegex = regexp.MustCompile(`(?s)Errors:.*\* *(.*)`)
 
@@ -45,9 +48,24 @@ func (h *CLIHandler) Auth(c *api.Client, m map[string]string) (*api.Secret, erro
 		port = defaultPort
 	}
 
+	callbackHost, ok := m["callbackhost"]
+	if !ok {
+		callbackHost = defaultCallbackHost
+	}
+
+	callbackMethod, ok := m["callbackmethod"]
+	if !ok {
+		callbackMethod = defaultCallbackMethod
+	}
+
+	callbackPort, ok := m["callbackport"]
+	if !ok {
+		callbackPort = port
+	}
+
 	role := m["role"]
 
-	authURL, err := fetchAuthURL(c, role, mount, port)
+	authURL, err := fetchAuthURL(c, role, mount, callbackPort, callbackMethod, callbackHost)
 	if err != nil {
 		return nil, err
 	}
@@ -105,12 +123,12 @@ func (h *CLIHandler) Auth(c *api.Client, m map[string]string) (*api.Secret, erro
 	}
 }
 
-func fetchAuthURL(c *api.Client, role, mount, port string) (string, error) {
+func fetchAuthURL(c *api.Client, role, mount, callbackport string, callbackMethod string, callbackHost string) (string, error) {
 	var authURL string
 
 	data := map[string]interface{}{
 		"role":         role,
-		"redirect_uri": fmt.Sprintf("http://localhost:%s/oidc/callback", port),
+		"redirect_uri": fmt.Sprintf("%s://%s:%s/oidc/callback", callbackMethod, callbackHost, callbackport),
 	}
 
 	secret, err := c.Logical().Write(fmt.Sprintf("auth/%s/oidc/auth_url", mount), data)
@@ -129,18 +147,31 @@ func fetchAuthURL(c *api.Client, role, mount, port string) (string, error) {
 	return authURL, nil
 }
 
+// isWSL tests if the binary is being run in Windows Subsystem for Linux
+func isWSL() bool {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		return false
+	}
+	data, err := ioutil.ReadFile("/proc/version")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Unable to read /proc/version.\n")
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(data)), "microsoft")
+}
+
 // openURL opens the specified URL in the default browser of the user.
 // Source: https://stackoverflow.com/a/39324149/453290
 func openURL(url string) error {
 	var cmd string
 	var args []string
 
-	switch runtime.GOOS {
-	case "windows":
-		cmd = "cmd"
+	switch {
+	case "windows" == runtime.GOOS || isWSL():
+		cmd = "cmd.exe"
 		args = []string{"/c", "start"}
 		url = strings.Replace(url, "&", "^&", -1)
-	case "darwin":
+	case "darwin" == runtime.GOOS:
 		cmd = "open"
 	default: // "linux", "freebsd", "openbsd", "netbsd"
 		cmd = "xdg-open"
@@ -209,7 +240,16 @@ Configuration:
       Vault role of type "OIDC" to use for authentication.
 
   port=<string>
-      Optional localhost port to use for OIDC callback (default: 8250).
+	  Optional localhost port to use for OIDC callback (default: 8250).
+
+  callbackmethod=<string>
+	  Optional method to to use in OIDC redirect_uri (default: http).
+
+  callbackhost=<string>
+	  Optional callback host adddress to use in OIDC redirect_uri (default: localhost).
+
+  callbackport=<string>
+      Optional port to to use in OIDC redirect_uri (default: the value set for port).
 `
 
 	return strings.TrimSpace(help)
