@@ -15,11 +15,10 @@ import (
 
 // tryToAddGSuiteMetadata adds claims from gsuite metadata for department and teams
 func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[string]interface{}) error {
-	// if config is not defined, skip
-	if config.GSuiteServiceAccountEmail == "" || config.GSuiteServiceAccountPrivateKeyID == "" ||
-		config.GSuiteServiceAccountPrivateKey == "" || config.GSuiteImpersonateEmail == "" {
+	b.Logger().Trace("Attempting to enhance claims with Gsuite based data")
 
-		b.Logger().Warn("skipping gsuite metadata, config missing")
+	// if config is not defined, skip
+	if !b.checkGsuiteCredentialsAreConfigured(config) {
 		return nil
 	}
 
@@ -55,6 +54,7 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 	if !strings.HasPrefix(dept, deptPrefix) {
 		dept = deptPrefix + dept
 	}
+
 	metadataAttributes = append(metadataAttributes, "gsuite-"+dept)
 
 	teamPrefix := "team-"
@@ -71,13 +71,44 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 
 	groups, err := googleGroups(user, svc)
 	if err != nil {
-		return errors.New("Unable to lookup group memeberships of user")
+		return fmt.Errorf("Unable to lookup group memberships of user (%e).", err)
 	}
 	metadataAttributes = append(metadataAttributes, groups)
 
-	b.Logger().Debug("gsuite_metadata claims: %v", metadataAttributes)
 	claims["gsuite_metadata"] = metadataAttributes
+	b.Logger().Trace("claims for " + userEmail, "values", claims)
 	return nil
+}
+
+// it would be more ideal to just do this configuration when the jwtAuthConfig backend is initialized
+// and store that result once, or swap in a no-op function in place of an "enhance" function based on that result
+// but in the interest of maximizing how many of our forked changes are in files that are not part of the upstream
+// fork, to make patching in updates less of a headache, this is currently called once per login request to
+// this backend
+func (b *jwtAuthBackend) checkGsuiteCredentialsAreConfigured(config *jwtConfig) bool {
+	configured := true
+
+	if config.GSuiteServiceAccountEmail == "" {
+		b.Logger().Warn("Skipping Gsuite based claims enhancement: `gsuite_service_account_email` not configured")
+		configured = false
+	}
+
+	if config.GSuiteServiceAccountPrivateKeyID == "" {
+		b.Logger().Warn("Skipping Gsuite based claims enhancement: `gsuite_service_account_private_key_id` not configured")
+		configured = false
+	}
+
+	if config.GSuiteServiceAccountPrivateKey == "" {
+		b.Logger().Warn("Skipping Gsuite based claims enhancement: `gsuite_service_account_private_key` not configured")
+		configured = false
+	}
+
+	if config.GSuiteImpersonateEmail == "" {
+		b.Logger().Warn("Skipping Gsuite based claims enhancement: `gsuite_impersonate_email` not configured")
+		configured = false
+	}
+
+	return configured
 }
 
 func newGSuiteDirectoryClient(impersonateEmail, serviceAccountEmail, serviceAccountPrivateKeyID, serviceAccountPrivateKey string) (*directory.Service, error) {
