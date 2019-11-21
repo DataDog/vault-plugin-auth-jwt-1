@@ -13,6 +13,8 @@ import (
 	"golang.org/x/oauth2/jwt"
 )
 
+const tokenURI = "https://accounts.google.com/o/oauth2/token"
+
 // tryToAddGSuiteMetadata adds claims from gsuite metadata for department and teams
 func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[string]interface{}) error {
 	b.Logger().Trace("Attempting to enhance claims with Gsuite based data")
@@ -71,9 +73,12 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 
 	groups, err := googleGroups(user, svc)
 	if err != nil {
-		return fmt.Errorf("Unable to lookup group memberships of user (%e).", err)
+		return fmt.Errorf("unable to lookup group memberships of user (%e)", err)
 	}
-	metadataAttributes = append(metadataAttributes, groups)
+
+	for _, group := range groups {
+		metadataAttributes = append(metadataAttributes, group)
+	}
 
 	claims["gsuite_metadata"] = metadataAttributes
 	b.Logger().Trace("claims for " + userEmail, "values", claims)
@@ -112,15 +117,16 @@ func (b *jwtAuthBackend) checkGsuiteCredentialsAreConfigured(config *jwtConfig) 
 }
 
 func newGSuiteDirectoryClient(impersonateEmail, serviceAccountEmail, serviceAccountPrivateKeyID, serviceAccountPrivateKey string) (*directory.Service, error) {
-	tokenURI := "https://accounts.google.com/o/oauth2/token"
-
 	config := &jwt.Config{
 		Email:        serviceAccountEmail,
 		PrivateKey:   []byte(strings.ReplaceAll(serviceAccountPrivateKey, `\n`, "\n")),
 		PrivateKeyID: serviceAccountPrivateKeyID,
 
 		// Docs: https://developers.google.com/identity/protocols/OAuth2ServiceAccount#delegatingauthority
-		Scopes:   []string{directory.AdminDirectoryUserReadonlyScope},
+		Scopes:   []string{
+			directory.AdminDirectoryUserReadonlyScope,
+			directory.AdminDirectoryGroupReadonlyScope,
+		},
 		Subject:  impersonateEmail,
 		TokenURL: tokenURI,
 	}
