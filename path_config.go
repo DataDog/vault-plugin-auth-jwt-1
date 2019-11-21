@@ -76,6 +76,9 @@ func pathConfig(b *jwtAuthBackend) *framework.Path {
 			"gsuite_service_account_private_key": {
 				Type:        framework.TypeString,
 				Description: "Google service account private key. (required for GSuite metadata)",
+				DisplayAttrs: &framework.DisplayAttributes{
+					Sensitive: true,
+				},
 			},
 			"gsuite_impersonate_email": &framework.FieldSchema{
 				Type:        framework.TypeString,
