@@ -8,12 +8,14 @@ import (
 	"reflect"
 	"strings"
 
+	log "github.com/hashicorp/go-hclog"
 	directory "google.golang.org/api/admin/directory/v1"
 
 	"golang.org/x/oauth2/jwt"
 )
 
 const tokenURI = "https://accounts.google.com/o/oauth2/token"
+const groupClaimPrefix = "gsuite-group-"
 
 // tryToAddGSuiteMetadata adds claims from gsuite metadata for department and teams
 func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[string]interface{}) error {
@@ -41,11 +43,8 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 		return err
 	}
 
-	emailParts := strings.Split(userEmail, "@")
-	if len(emailParts) < 1 {
-		return errors.New("email malformed")
-	}
-	claims["gsuite_username"] = emailParts[0]
+	email, err := parseEmail(userEmail)
+	claims["gsuite_username"] = email.localpart
 
 	metadataAttributes := []interface{}{}
 
@@ -71,7 +70,11 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 	}
 	claims["gsuite_teams"] = teams
 
-	groups, err := googleGroups(user, svc)
+	client := &directoryClient {
+		log: b.Logger(),
+		service: svc,
+	}
+	groups, err := client.groupClaimsFor(user)
 	if err != nil {
 		return fmt.Errorf("unable to lookup group memberships of user (%e)", err)
 	}
@@ -254,27 +257,39 @@ func extractAttributes(u *directory.User, category, name string) []string {
 	return attrs
 }
 
+type directoryClient struct {
+	service *directory.Service
+	log log.Logger
+}
+
 // googleGroups returns a list of Google groups that email is a member of.
-func googleGroups(u *directory.User, client *directory.Service) ([]string, error) {
-	groupsList, err := client.Groups.List().UserKey(u.Id).Do()
+func (client *directoryClient) groupClaimsFor(u *directory.User) ([]string, error) {
+	groupsList, err := client.service.Groups.List().UserKey(u.Id).Do()
 	if err != nil {
 		return nil, err
 	}
 
-	var groups []string
-	for _, g := range groupsList.Groups {
-		groups = append(groups, g.Name)
-	}
-
-	// Populate policies if the equivalent Google group exists
 	var claims []string
-	groupPrefix := "gsuite-group-"
-	for _, group := range groups {
-		if !strings.HasPrefix(group, groupPrefix) {
-			group = groupPrefix + group
+	for _, g := range groupsList.Groups {
+		client.log.Trace("Processing group", "name", g.Name, "email", g.Email)
+		email, err := parseEmail(g.Email)
+		if err != nil {
+			return nil, err
 		}
 
-		claims = append(claims, normalize(group))
+		// The API call we use does not appear to return external group memberships,
+		// such as the Vault public mailing list, at this time. But for the sake of
+		// guarding against future Google "feature enhancements" we only include group
+		// claims that are from the datadoghq.com domain
+		if email.domain != "datadoghq.com" {
+			client.log.Warn("Found unexpected group membership for non-datadoghq.com domain",
+				"user", u.Name.FullName, "group address", g.Email, "group name", g.Name)
+			break
+		}
+
+		group := email.localpart
+		claim := normalize(groupClaimPrefix + group)
+		claims = append(claims, claim)
 	}
 
 	return claims, nil
@@ -287,4 +302,22 @@ func normalize(s string) string {
 	s = strings.Replace(s, "_", "-", -1)
 
 	return s
+}
+
+type email struct {
+	localpart string
+	domain string
+}
+
+func parseEmail(e string) (email, error) {
+	var parsed email
+	emailParts := strings.Split(e, "@")
+	if len(emailParts) < 1 {
+		return parsed, fmt.Errorf("email malformed (%s)", e)
+	}
+
+	return email{
+		localpart: emailParts[0],
+		domain: emailParts[1],
+	}, nil
 }
