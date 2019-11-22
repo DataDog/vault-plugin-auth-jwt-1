@@ -5,21 +5,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/hashicorp/go-uuid"
+	"github.com/hashicorp/vault/sdk/logical"
 	"reflect"
 	"strings"
 
+	log "github.com/hashicorp/go-hclog"
 	directory "google.golang.org/api/admin/directory/v1"
 
 	"golang.org/x/oauth2/jwt"
 )
 
+const (
+	tokenURI         = "https://accounts.google.com/o/oauth2/token"
+	groupClaimPrefix = "gsuite-group-"
+)
+
 // tryToAddGSuiteMetadata adds claims from gsuite metadata for department and teams
 func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[string]interface{}) error {
-	// if config is not defined, skip
-	if config.GSuiteServiceAccountEmail == "" || config.GSuiteServiceAccountPrivateKeyID == "" ||
-		config.GSuiteServiceAccountPrivateKey == "" || config.GSuiteImpersonateEmail == "" {
+	b.Logger().Trace("Attempting to enhance claims with Gsuite based data")
 
-		b.Logger().Debug("skipping gsuite metadata, config missing")
+	// if config is not defined, skip
+	if !b.checkGsuiteCredentialsAreConfigured(config) {
 		return nil
 	}
 
@@ -40,12 +47,12 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 		return err
 	}
 
-	emailParts := strings.Split(userEmail, "@")
-	if len(emailParts) < 1 {
-		return errors.New("email malformed")
+	email, err := parseEmail(userEmail)
+	if err != nil {
+		return err
 	}
-	claims["gsuite_username"] = emailParts[0]
 
+	claims["gsuite_username"] = email.localpart
 	metadataAttributes := []interface{}{}
 
 	dept := extractDepartmentFromUser(user)
@@ -55,6 +62,7 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 	if !strings.HasPrefix(dept, deptPrefix) {
 		dept = deptPrefix + dept
 	}
+
 	metadataAttributes = append(metadataAttributes, "gsuite-"+dept)
 
 	teamPrefix := "team-"
@@ -69,20 +77,66 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 	}
 	claims["gsuite_teams"] = teams
 
+	client := &directoryClient{
+		log:     b.Logger(),
+		service: svc,
+	}
+	groups, err := client.groupClaimsFor(user)
+	if err != nil {
+		return fmt.Errorf("unable to lookup group memberships of user (%e)", err)
+	}
+
+	for _, group := range groups {
+		metadataAttributes = append(metadataAttributes, group)
+	}
+
 	claims["gsuite_metadata"] = metadataAttributes
+	b.Logger().Trace("enhanced user claims", "userEmail", userEmail, "values", claims)
 	return nil
 }
 
-func newGSuiteDirectoryClient(impersonateEmail, serviceAccountEmail, serviceAccountPrivateKeyID, serviceAccountPrivateKey string) (*directory.Service, error) {
-	tokenURI := "https://accounts.google.com/o/oauth2/token"
+// it would be more ideal to just do this configuration when the jwtAuthConfig backend is initialized
+// and store that result once, or swap in a no-op function in place of an "enhance" function based on that result
+// but in the interest of maximizing how many of our forked changes are in files that are not part of the upstream
+// fork, to make patching in updates less of a headache, this is currently called once per login request to
+// this backend
+func (b *jwtAuthBackend) checkGsuiteCredentialsAreConfigured(config *jwtConfig) bool {
+	configured := true
 
+	if config.GSuiteServiceAccountEmail == "" {
+		b.Logger().Warn("Skipping Gsuite based claims enhancement: `gsuite_service_account_email` not configured")
+		configured = false
+	}
+
+	if config.GSuiteServiceAccountPrivateKeyID == "" {
+		b.Logger().Warn("Skipping Gsuite based claims enhancement: `gsuite_service_account_private_key_id` not configured")
+		configured = false
+	}
+
+	if config.GSuiteServiceAccountPrivateKey == "" {
+		b.Logger().Warn("Skipping Gsuite based claims enhancement: `gsuite_service_account_private_key` not configured")
+		configured = false
+	}
+
+	if config.GSuiteImpersonateEmail == "" {
+		b.Logger().Warn("Skipping Gsuite based claims enhancement: `gsuite_impersonate_email` not configured")
+		configured = false
+	}
+
+	return configured
+}
+
+func newGSuiteDirectoryClient(impersonateEmail, serviceAccountEmail, serviceAccountPrivateKeyID, serviceAccountPrivateKey string) (*directory.Service, error) {
 	config := &jwt.Config{
 		Email:        serviceAccountEmail,
 		PrivateKey:   []byte(strings.ReplaceAll(serviceAccountPrivateKey, `\n`, "\n")),
 		PrivateKeyID: serviceAccountPrivateKeyID,
 
 		// Docs: https://developers.google.com/identity/protocols/OAuth2ServiceAccount#delegatingauthority
-		Scopes:   []string{directory.AdminDirectoryUserReadonlyScope},
+		Scopes: []string{
+			directory.AdminDirectoryUserReadonlyScope,
+			directory.AdminDirectoryGroupReadonlyScope,
+		},
 		Subject:  impersonateEmail,
 		TokenURL: tokenURI,
 	}
@@ -210,6 +264,54 @@ func extractAttributes(u *directory.User, category, name string) []string {
 	return attrs
 }
 
+type directoryClient struct {
+	service *directory.Service
+	log     log.Logger
+}
+
+// googleGroups returns a list of Google groups that email is a member of.
+func (client *directoryClient) groupClaimsFor(u *directory.User) ([]string, error) {
+	groupsList, err := client.service.Groups.List().UserKey(u.Id).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	var claims []string
+	for _, g := range groupsList.Groups {
+		client.log.Trace("Processing group", "name", g.Name, "email", g.Email)
+		email, err := parseEmail(g.Email)
+		if err != nil {
+			return nil, err
+		}
+
+		// The API call we use does not appear to return external group memberships,
+		// such as the Vault public mailing list, at this time. But for the sake of
+		// guarding against future Google "feature enhancements" we only include group
+		// claims that are from the datadoghq.com domain
+		if email.domain != "datadoghq.com" {
+			client.log.Warn("Found unexpected group membership for non-datadoghq.com domain",
+				"user", u.Name.FullName, "group address", g.Email, "group name", g.Name)
+			break
+		}
+
+		group := email.localpart
+		claim := normalize(groupClaimPrefix + group)
+		claims = append(claims, claim)
+	}
+
+	return claims, nil
+}
+
+func (b *jwtAuthBackend) responseFromGsuiteError(err error) *logical.Response {
+	errId, genErr := uuid.GenerateUUID()
+	if genErr != nil {
+		b.Logger().Error("Failed to generate UUID")
+	}
+	b.Logger().Error("GSuite claims enhancement failed", "error", err, "errorId", errId)
+	return logical.ErrorResponse("There was an error enhancing the user claims with additional GSuite data, contact #vault for help (%s)", errId)
+
+}
+
 // returns the lowercased string with all spaces removed and underscores converted to dashes
 func normalize(s string) string {
 	s = strings.ToLower(s)
@@ -217,4 +319,21 @@ func normalize(s string) string {
 	s = strings.Replace(s, "_", "-", -1)
 
 	return s
+}
+
+type email struct {
+	localpart string
+	domain    string
+}
+
+func parseEmail(e string) (email, error) {
+	emailParts := strings.Split(e, "@")
+	if len(emailParts) < 2 {
+		return email{}, fmt.Errorf("email malformed (%s)", e)
+	}
+
+	return email{
+		localpart: emailParts[0],
+		domain:    emailParts[1],
+	}, nil
 }

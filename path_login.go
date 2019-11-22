@@ -218,7 +218,7 @@ func (b *jwtAuthBackend) pathLogin(ctx context.Context, req *logical.Request, d 
 	}
 
 	if err := b.tryToAddGSuiteMetadata(config, allClaims); err != nil {
-		return logical.ErrorResponse(err.Error()), nil
+		return b.responseFromGsuiteError(err), nil
 	}
 
 	alias, groupAliases, err := b.createIdentity(allClaims, role)
