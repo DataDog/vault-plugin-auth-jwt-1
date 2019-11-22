@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/hashicorp/go-uuid"
+	"github.com/hashicorp/vault/sdk/logical"
 	"reflect"
 	"strings"
 
@@ -14,8 +16,10 @@ import (
 	"golang.org/x/oauth2/jwt"
 )
 
-const tokenURI = "https://accounts.google.com/o/oauth2/token"
-const groupClaimPrefix = "gsuite-group-"
+const (
+	tokenURI         = "https://accounts.google.com/o/oauth2/token"
+	groupClaimPrefix = "gsuite-group-"
+)
 
 // tryToAddGSuiteMetadata adds claims from gsuite metadata for department and teams
 func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[string]interface{}) error {
@@ -44,8 +48,11 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 	}
 
 	email, err := parseEmail(userEmail)
-	claims["gsuite_username"] = email.localpart
+	if err != nil {
+		return err
+	}
 
+	claims["gsuite_username"] = email.localpart
 	metadataAttributes := []interface{}{}
 
 	dept := extractDepartmentFromUser(user)
@@ -70,8 +77,8 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 	}
 	claims["gsuite_teams"] = teams
 
-	client := &directoryClient {
-		log: b.Logger(),
+	client := &directoryClient{
+		log:     b.Logger(),
 		service: svc,
 	}
 	groups, err := client.groupClaimsFor(user)
@@ -84,7 +91,7 @@ func (b *jwtAuthBackend) tryToAddGSuiteMetadata(config *jwtConfig, claims map[st
 	}
 
 	claims["gsuite_metadata"] = metadataAttributes
-	b.Logger().Trace("claims for " + userEmail, "values", claims)
+	b.Logger().Trace("enhanced user claims", "userEmail", userEmail, "values", claims)
 	return nil
 }
 
@@ -126,7 +133,7 @@ func newGSuiteDirectoryClient(impersonateEmail, serviceAccountEmail, serviceAcco
 		PrivateKeyID: serviceAccountPrivateKeyID,
 
 		// Docs: https://developers.google.com/identity/protocols/OAuth2ServiceAccount#delegatingauthority
-		Scopes:   []string{
+		Scopes: []string{
 			directory.AdminDirectoryUserReadonlyScope,
 			directory.AdminDirectoryGroupReadonlyScope,
 		},
@@ -259,7 +266,7 @@ func extractAttributes(u *directory.User, category, name string) []string {
 
 type directoryClient struct {
 	service *directory.Service
-	log log.Logger
+	log     log.Logger
 }
 
 // googleGroups returns a list of Google groups that email is a member of.
@@ -295,6 +302,16 @@ func (client *directoryClient) groupClaimsFor(u *directory.User) ([]string, erro
 	return claims, nil
 }
 
+func (b *jwtAuthBackend) responseFromGsuiteError(err error) *logical.Response {
+	errId, genErr := uuid.GenerateUUID()
+	if genErr != nil {
+		b.Logger().Error("Failed to generate UUID")
+	}
+	b.Logger().Error("GSuite claims enhancement failed", "error", err, "errorId", errId)
+	return logical.ErrorResponse("There was an error enhancing the user claims with additional GSuite data, contact #vault for help (%s)", errId)
+
+}
+
 // returns the lowercased string with all spaces removed and underscores converted to dashes
 func normalize(s string) string {
 	s = strings.ToLower(s)
@@ -306,18 +323,17 @@ func normalize(s string) string {
 
 type email struct {
 	localpart string
-	domain string
+	domain    string
 }
 
 func parseEmail(e string) (email, error) {
-	var parsed email
 	emailParts := strings.Split(e, "@")
-	if len(emailParts) < 1 {
-		return parsed, fmt.Errorf("email malformed (%s)", e)
+	if len(emailParts) < 2 {
+		return email{}, fmt.Errorf("email malformed (%s)", e)
 	}
 
 	return email{
 		localpart: emailParts[0],
-		domain: emailParts[1],
+		domain:    emailParts[1],
 	}, nil
 }

@@ -190,8 +190,7 @@ func (b *jwtAuthBackend) pathCallback(ctx context.Context, req *logical.Request,
 	}
 
 	if err := b.tryToAddGSuiteMetadata(config, allClaims); err != nil {
-		b.Logger().Error("GSuite claims enhancement failed", "error", err.Error())
-		return logical.ErrorResponse("There was an error enhancing the user claims with additional GSuite data, contact #Vault for help"), nil
+		return b.responseFromGsuiteError(err), nil
 	}
 
 	alias, groupAliases, err := b.createIdentity(allClaims, role)
